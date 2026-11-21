@@ -162,24 +162,31 @@ function privateIp(ip) {
   return x === '::' || x === '::1' || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x);
 }
 const hostCache = new Map();
-export async function isPrivateHost(hostname) {
+// Tri-state classification: 'private' | 'public' | 'unknown' (lookup failed; not cached).
+export async function classifyHost(hostname) {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  if (isIP(h)) return privateIp(h);
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return 'private';
+  if (isIP(h)) return privateIp(h) ? 'private' : 'public';
   if (hostCache.has(h)) return hostCache.get(h);
   try {
     const rs = await lookup(h, { all: true });
-    const priv = rs.some((r) => privateIp(r.address));
-    hostCache.set(h, priv); // only successful lookups are cached
-    return priv;
+    const cls = rs.some((r) => privateIp(r.address)) ? 'private' : 'public';
+    hostCache.set(h, cls); // only successful lookups are cached
+    return cls;
   } catch {
-    return true; // fail closed: an unresolvable host is treated as blocked (not cached)
+    return 'unknown';
   }
+}
+// For per-request checks: anything not positively public is blocked (fail closed).
+export async function isPrivateHost(hostname) {
+  return (await classifyHost(hostname)) !== 'public';
 }
 let fetchGuard = null;
 // Call once per run with the audited URL. Auditing a local/private site allows private targets.
 export async function enableSsrfGuard(startUrl, { allowPrivate = false } = {}) {
-  if (allowPrivate || (await isPrivateHost(new URL(startUrl).hostname))) { fetchGuard = null; return false; }
+  // The guard is switched off only when the audit target is POSITIVELY local/private. An
+  // unresolvable target keeps the guard on (the run will simply fail to fetch it).
+  if (allowPrivate || (await classifyHost(new URL(startUrl).hostname)) === 'private') { fetchGuard = null; return false; }
   // Fails closed. Residual risk (documented in SKILL.md): DNS rebinding between this check and
   // fetch()'s own resolution cannot be pinned without an extra dependency.
   fetchGuard = async (u) => {
