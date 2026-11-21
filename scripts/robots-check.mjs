@@ -27,7 +27,10 @@ runMain(async () => {
     if (args.file === true) throw new UsageError('--file needs a path');
     try { text = readFileSync(String(args.file), 'utf8'); } catch (e) { throw new UsageError(`cannot read ${args.file}: ${e.code || e.message}`); }
     source = String(args.file);
-    if (positional[0] && !positional[0].startsWith('/')) origin = new URL(urlArg(positional.shift(), 'origin')).origin;
+    if (positional[0] && !positional[0].startsWith('/')) {
+      origin = new URL(urlArg(positional.shift(), 'origin')).origin;
+      await enableSsrfGuard(origin, { allowPrivate: args['allow-private'] === true });
+    }
   } else {
     origin = new URL(urlArg(positional.shift(), 'origin')).origin;
     await enableSsrfGuard(origin, { allowPrivate: args['allow-private'] === true });

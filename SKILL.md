@@ -148,6 +148,9 @@ Exit codes (all scripts): 2 = FATAL found, 1 = HIGH found, 0 = otherwise, 3 = co
 Network safety: when the audited site is public, the scripts refuse requests to private, loopback
 and link-local addresses (e.g. cloud metadata endpoints) that a hostile site could point them at via
 sitemaps, og:image or redirects; `--allow-private` overrides. Output from pages is sanitised before printing.
+Residual risk: the check resolves hostnames before Node's fetch resolves them again, so a DNS-rebinding
+attacker could still switch addresses in between; run audits of untrusted sites from a machine without
+sensitive internal services if that matters.
 `verify-redirects`: 1 = a row failed. `slop-check`: 1 = hits remain. `indexnow`: 1 = key file or submission failed.
 With `--json` every script prints valid JSON, including on usage and internal errors; those carry
 severity INFO (a typo or an unreachable network is not a site defect) and the exit code (64 / 3) says what happened.

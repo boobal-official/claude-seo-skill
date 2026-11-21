@@ -134,15 +134,31 @@ export function safe(s) {
 // Untrusted sites can point the tools at internal addresses (robots.txt Sitemap lines, sitemap
 // indexes, og:image, redirects). Unless the audit itself targets a private/local host, requests to
 // loopback, private, link-local (cloud metadata), CGNAT and unique-local addresses are refused.
-import { isIP } from 'node:net';
+import { isIP, BlockList } from 'node:net';
+// Second, independent classifier: Node's BlockList checks IPv4-mapped IPv6 against IPv4 rules natively.
+const PRIVATE_NETS = new BlockList();
+for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]]) PRIVATE_NETS.addSubnet(net, bits, 'ipv4');
+for (const [net, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['64:ff9b::', 96], ['2002::', 16], ['::', 96]]) PRIVATE_NETS.addSubnet(net, bits, 'ipv6');
 import { lookup } from 'node:dns/promises';
 function privateIp(ip) {
+  const fam = isIP(String(ip).replace(/^\[|\]$/g, ''));
+  if (fam && PRIVATE_NETS.check(String(ip).replace(/^\[|\]$/g, ''), fam === 4 ? 'ipv4' : 'ipv6')) return true;
   if (isIP(ip) === 4) {
     const [a, b] = ip.split('.').map(Number);
     return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
   }
-  const x = ip.toLowerCase();
-  if (x.startsWith('::ffff:')) return privateIp(x.slice(7));
+  const x = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  // IPv4 embedded in IPv6: mapped (::ffff:a.b.c.d or the hex form ::ffff:7f00:1 that URL parsing
+  // produces), IPv4-compatible (::a.b.c.d / ::hhhh:hhhh), NAT64 (64:ff9b::/96) and 6to4 (2002::/16)
+  // can all reach IPv4 hosts, so classify them by the embedded address or treat them as private.
+  const embedded = /^(?:0{0,4}:){0,5}(?::|0{0,4}:)?(?:ffff(?::0{1,4})?:)?((?:\d{1,3}\.){3}\d{1,3})$/.exec(x) || null;
+  if (embedded && isIP(embedded[1]) === 4) return privateIp(embedded[1]);
+  const hex = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(x);
+  if (hex) {
+    const a = parseInt(hex[1], 16), b = parseInt(hex[2], 16);
+    return privateIp(`${a >> 8}.${a & 255}.${b >> 8}.${b & 255}`);
+  }
+  if (/^64:ff9b:/.test(x) || /^2002:/.test(x)) return true;
   return x === '::' || x === '::1' || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x);
 }
 const hostCache = new Map();
@@ -150,18 +166,29 @@ export async function isPrivateHost(hostname) {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
   if (isIP(h)) return privateIp(h);
-  if (!hostCache.has(h)) hostCache.set(h, lookup(h, { all: true }).then((rs) => rs.some((r) => privateIp(r.address))).catch(() => false));
-  return hostCache.get(h);
+  if (hostCache.has(h)) return hostCache.get(h);
+  try {
+    const rs = await lookup(h, { all: true });
+    const priv = rs.some((r) => privateIp(r.address));
+    hostCache.set(h, priv); // only successful lookups are cached
+    return priv;
+  } catch {
+    return true; // fail closed: an unresolvable host is treated as blocked (not cached)
+  }
 }
 let fetchGuard = null;
 // Call once per run with the audited URL. Auditing a local/private site allows private targets.
 export async function enableSsrfGuard(startUrl, { allowPrivate = false } = {}) {
   if (allowPrivate || (await isPrivateHost(new URL(startUrl).hostname))) { fetchGuard = null; return false; }
+  // Fails closed. Residual risk (documented in SKILL.md): DNS rebinding between this check and
+  // fetch()'s own resolution cannot be pinned without an extra dependency.
   fetchGuard = async (u) => {
+    let host;
+    try { host = new URL(u).hostname; } catch { return 'blocked: invalid URL'; }
     try {
-      return (await isPrivateHost(new URL(u).hostname)) ? `blocked: ${new URL(u).hostname} resolves to a private/loopback/link-local address (SSRF protection; pass --allow-private to override)` : null;
+      return (await isPrivateHost(host)) ? `blocked: ${host} is a private/loopback/link-local address (SSRF protection; pass --allow-private to override)` : null;
     } catch {
-      return null;
+      return `blocked: could not classify ${host}`;
     }
   };
   return true;

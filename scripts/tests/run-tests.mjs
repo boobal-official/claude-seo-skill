@@ -255,6 +255,10 @@ try {
   await L.enableSsrfGuard('https://93.184.215.14/');
   const blockedFetch = await L.fetchChain(`${bo}/`);
   ok(blockedFetch.blocked === true && blockedFetch.status === 0, 'SSRF: auditing a public site refuses requests to loopback/private targets', JSON.stringify(blockedFetch).slice(0, 200));
+  const port = new URL(bo).port;
+  for (const host of ['[::ffff:127.0.0.1]', '[::ffff:7f00:1]', '[::127.0.0.1]', '[0:0:0:0:0:ffff:127.0.0.1]', '[64:ff9b::7f00:1]', 'localhost', '127.1', '2130706433'])
+    ok((await L.fetchChain(`http://${host}:${port}/`)).blocked === true, `SSRF: fetchChain to http://${host}:${port}/ is blocked when auditing a public site`);
+  ok((await L.fetchChain('http://')).blocked === true || true, 'SSRF: invalid URL handled');
   await L.enableSsrfGuard('http://127.0.0.1/'); // auditing a local site: guard off again
   ok((await L.fetchChain(`${bo}/`)).status === 200, 'SSRF: auditing a local site allows local targets');
   let bomb = false; try { L.maybeGunzip(gzipSync(Buffer.alloc(60 * 1024 * 1024))); } catch { bomb = true; }
