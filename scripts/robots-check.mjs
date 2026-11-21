@@ -8,7 +8,7 @@
 // Note: an AI-search block the owner approved stays HIGH by design; report it as accepted.
 
 import { readFileSync } from 'node:fs';
-import { parseArgs, fetchChain, printIssues, exitCodeFor, runMain, urlArg, UsageError } from './lib.mjs';
+import { enableSsrfGuard, safe, parseArgs, fetchChain, printIssues, exitCodeFor, runMain, urlArg, UsageError } from './lib.mjs';
 import { parseRobots, isAllowed, BOTS } from './robots.mjs';
 import { T } from './thresholds.mjs';
 
@@ -30,6 +30,7 @@ runMain(async () => {
     if (positional[0] && !positional[0].startsWith('/')) origin = new URL(urlArg(positional.shift(), 'origin')).origin;
   } else {
     origin = new URL(urlArg(positional.shift(), 'origin')).origin;
+    await enableSsrfGuard(origin, { allowPrivate: args['allow-private'] === true });
     source = `${origin}/robots.txt`;
     const res = await fetchChain(source, { maxHops: T.robotsMaxRedirectHops });
     if (res.error && /redirect/.test(res.error)) {
@@ -125,7 +126,7 @@ runMain(async () => {
     console.log(`groups: ${parsed.groups.length}, sitemaps: ${parsed.sitemaps.length}\n`);
     const w = 20;
     console.log('Bot'.padEnd(w) + 'Category'.padEnd(13) + paths.map((p) => p.slice(0, 18).padEnd(20)).join(''));
-    for (const r of rows) console.log(r.token.padEnd(w) + r.category.padEnd(13) + r.results.map((x) => (x.allowed ? 'allow' : `BLOCK(${x.rule.path})`).slice(0, 18).padEnd(20)).join(''));
+    for (const r of rows) console.log(r.token.padEnd(w) + r.category.padEnd(13) + r.results.map((x) => (x.allowed ? 'allow' : `BLOCK(${safe(x.rule.path)})`).slice(0, 18).padEnd(20)).join(''));
     console.log('');
     printIssues(issues);
   }

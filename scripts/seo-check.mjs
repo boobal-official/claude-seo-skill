@@ -7,7 +7,7 @@
 // which is what non-rendering crawlers (most AI crawlers) see.
 // Exit: 2 = FATAL, 1 = HIGH, 0 = otherwise, 3 = could not complete, 64 = usage error.
 
-import { parseArgs, fetchChain, resolveUA, UA_PRESETS, printIssues, exitCodeFor, normalizeUrl, findTags, scan, runMain, urlArg } from './lib.mjs';
+import { enableSsrfGuard, safe, parseArgs, fetchChain, resolveUA, UA_PRESETS, printIssues, exitCodeFor, normalizeUrl, findTags, scan, runMain, urlArg } from './lib.mjs';
 import { analyzeHtml, analyzeResponse } from './page.mjs';
 import { T } from './thresholds.mjs';
 
@@ -16,6 +16,7 @@ const args = parseArgs(process.argv.slice(2));
 
 runMain(async () => {
   const url = urlArg(args._[0]);
+  await enableSsrfGuard(url, { allowPrivate: args['allow-private'] === true });
   if (args.bots) return bots(url);
 
   const ua = resolveUA(args.ua);
@@ -104,7 +105,7 @@ async function bots(url) {
   else {
     console.log(`Bot comparison for ${url}\n`);
     console.log('UA'.padEnd(16) + 'status'.padEnd(10) + 'hops'.padEnd(6) + 'words'.padEnd(8) + 'prices'.padEnd(8) + 'noindex'.padEnd(9) + 'title');
-    for (const r of rows) console.log(r.ua.padEnd(16) + String(r.status).slice(0, 9).padEnd(10) + String(r.hops).padEnd(6) + String(r.words).padEnd(8) + String(r.prices).padEnd(8) + String(r.noindex).padEnd(9) + r.title.slice(0, 50));
+    for (const r of rows) console.log(r.ua.padEnd(16) + String(r.status).slice(0, 9).padEnd(10) + String(r.hops).padEnd(6) + String(r.words).padEnd(8) + String(r.prices).padEnd(8) + String(r.noindex).padEnd(9) + safe(r.title.slice(0, 50)));
     console.log('\nNote: these requests spoof the UA from your IP. Sites that verify crawler IPs may answer differently than they do for the real bots.\n');
     printIssues(issues);
   }
@@ -117,17 +118,17 @@ function report(url, res, a, issues) {
     console.log(JSON.stringify({ url, finalUrl: res.finalUrl, status: res.status, error: res.error, chain: res.chain, ttfbMs: res.ttfbMs, bytes: res.bytes, ...rest, internalLinkUrls: links ? [...new Set(links.filter((l) => l.url).map((l) => l.url))].slice(0, 200) : [], issues }, null, 2));
   } else {
     console.log(`URL:        ${url}`);
-    if (res.chain?.length) console.log(`Redirects:  ${res.chain.map((h) => `${h.status} ${h.url}`).join(' -> ')} -> ${res.finalUrl}`);
+    if (res.chain?.length) console.log(`Redirects:  ${safe(res.chain.map((h) => `${h.status} ${h.url}`).join(' -> '))} -> ${safe(res.finalUrl)}`);
     console.log(`Status:     ${res.status || res.error}   TTFB ${res.ttfbMs ?? '-'} ms   ${Math.round((res.bytes || 0) / 1024)} KB   UA: ${args.ua || 'checker'}`);
     if (a) {
-      console.log(`Title:      ${a.title || '(none)'} [${a.titleLength}]`);
-      console.log(`Desc:       ${a.description ? a.description.slice(0, 100) : '(none)'} [${a.descriptionLength}]`);
-      console.log(`Canonical:  ${a.canonical || '(none)'}`);
-      console.log(`Robots:     ${a.robots || '(none: indexable)'}`);
-      console.log(`H1:         ${a.h1s.length ? a.h1s.map((h) => `"${h.slice(0, 60)}"`).join(', ') : '(none)'}`);
+      console.log(`Title:      ${safe(a.title) || '(none)'} [${a.titleLength}]`);
+      console.log(`Desc:       ${a.description ? safe(a.description.slice(0, 100)) : '(none)'} [${a.descriptionLength}]`);
+      console.log(`Canonical:  ${safe(a.canonical) || '(none)'}`);
+      console.log(`Robots:     ${safe(a.robots) || '(none: indexable)'}`);
+      console.log(`H1:         ${a.h1s.length ? a.h1s.map((h) => `"${safe(h.slice(0, 60))}"`).join(', ') : '(none)'}`);
       console.log(`Text:       ${a.words} words in raw HTML; ${a.internalLinks} internal links; prices seen: ${a.prices.join(' ') || 'none'}`);
       console.log(`Schema:     ${a.schemaTypes.join(', ') || 'none'} (${a.jsonLdBlocks} JSON-LD blocks)`);
-      if (a.hreflangs.length) console.log(`hreflang:   ${a.hreflangs.map((h) => h.lang).join(', ')}`);
+      if (a.hreflangs.length) console.log(`hreflang:   ${safe(a.hreflangs.map((h) => h.lang).join(', '))}`);
     }
     console.log('');
     printIssues(issues);

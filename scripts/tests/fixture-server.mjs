@@ -84,11 +84,15 @@ export function serve(factory) {
   return new Promise((resolve) => {
     let handler = null;
     const server = http.createServer((req, res) => handler(req, res));
-    server.listen(0, '127.0.0.1', () => {
+    // Dual-stack ('::' also accepts IPv4) so "localhost" works on Node 18, which resolves it to ::1
+    // first; falls back to IPv4-only where IPv6 is unavailable.
+    const ready = () => {
       const { port } = server.address();
       handler = factory(port);
       resolve({ server, origin: `http://127.0.0.1:${port}` });
-    });
+    };
+    server.once('error', () => server.listen(0, '127.0.0.1', ready));
+    server.listen({ port: 0, host: '::', ipv6Only: false }, ready);
   });
 }
 

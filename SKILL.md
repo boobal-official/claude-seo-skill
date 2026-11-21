@@ -145,6 +145,9 @@ state in `seo/` (`measurement.md` lists the files) so the next run starts where 
 Exit codes (all scripts): 2 = FATAL found, 1 = HIGH found, 0 = otherwise, 3 = could not complete
 (network, quota, internal error: report "not measured", never guess), 64 = usage error.
 `cwv`: 2 = a field metric poor, 1 = needs improvement, 0 = good or no field data, 3 = not measured.
+Network safety: when the audited site is public, the scripts refuse requests to private, loopback
+and link-local addresses (e.g. cloud metadata endpoints) that a hostile site could point them at via
+sitemaps, og:image or redirects; `--allow-private` overrides. Output from pages is sanitised before printing.
 `verify-redirects`: 1 = a row failed. `slop-check`: 1 = hits remain. `indexnow`: 1 = key file or submission failed.
 With `--json` every script prints valid JSON, including on usage and internal errors; those carry
 severity INFO (a typo or an unreachable network is not a site defect) and the exit code (64 / 3) says what happened.

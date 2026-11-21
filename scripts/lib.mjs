@@ -28,7 +28,7 @@ export function resolveUA(v) {
 
 // ---------- CLI helpers ----------
 // Boolean flags never consume the next argument, so flag order does not matter.
-const BOOL_FLAGS = new Set(['json', 'bots', 'deep', 'local', 'submit', 'offline', 'help']);
+const BOOL_FLAGS = new Set(['json', 'bots', 'deep', 'local', 'submit', 'offline', 'help', 'allow-private']);
 export function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -115,13 +115,56 @@ export function printIssues(issues, { indent = '' } = {}) {
     return;
   }
   for (const i of sorted) {
-    console.log(`${indent}[${i.sev}] ${i.code}: ${i.msg}`);
-    if (i.fix) console.log(`${indent}        fix: ${i.fix}`);
+    console.log(`${indent}[${i.sev}] ${i.code}: ${safe(i.msg)}`);
+    if (i.fix) console.log(`${indent}        fix: ${safe(i.fix)}`);
     if (i.urls?.length) {
-      for (const u of i.urls.slice(0, 10)) console.log(`${indent}        - ${u}`);
+      for (const u of i.urls.slice(0, 10)) console.log(`${indent}        - ${safe(u)}`);
       if (i.urls.length > 10) console.log(`${indent}        ... +${i.urls.length - 10} more`);
     }
   }
+}
+
+// Neutralises control characters from untrusted page content before printing to a terminal
+// (prevents ANSI/OSC escape-sequence injection via titles, URLs, headers).
+export function safe(s) {
+  return String(s ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '�');
+}
+
+// ---------- SSRF guard ----------
+// Untrusted sites can point the tools at internal addresses (robots.txt Sitemap lines, sitemap
+// indexes, og:image, redirects). Unless the audit itself targets a private/local host, requests to
+// loopback, private, link-local (cloud metadata), CGNAT and unique-local addresses are refused.
+import { isIP } from 'node:net';
+import { lookup } from 'node:dns/promises';
+function privateIp(ip) {
+  if (isIP(ip) === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  const x = ip.toLowerCase();
+  if (x.startsWith('::ffff:')) return privateIp(x.slice(7));
+  return x === '::' || x === '::1' || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x);
+}
+const hostCache = new Map();
+export async function isPrivateHost(hostname) {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (isIP(h)) return privateIp(h);
+  if (!hostCache.has(h)) hostCache.set(h, lookup(h, { all: true }).then((rs) => rs.some((r) => privateIp(r.address))).catch(() => false));
+  return hostCache.get(h);
+}
+let fetchGuard = null;
+// Call once per run with the audited URL. Auditing a local/private site allows private targets.
+export async function enableSsrfGuard(startUrl, { allowPrivate = false } = {}) {
+  if (allowPrivate || (await isPrivateHost(new URL(startUrl).hostname))) { fetchGuard = null; return false; }
+  fetchGuard = async (u) => {
+    try {
+      return (await isPrivateHost(new URL(u).hostname)) ? `blocked: ${new URL(u).hostname} resolves to a private/loopback/link-local address (SSRF protection; pass --allow-private to override)` : null;
+    } catch {
+      return null;
+    }
+  };
+  return true;
 }
 
 // ---------- HTTP ----------
@@ -143,6 +186,11 @@ export async function fetchChain(url, opts = {}) {
   const t0 = performance.now();
   for (let i = 0; i <= maxHops; i++) {
     const hopStart = performance.now();
+    const guard = opts.guard === undefined ? fetchGuard : opts.guard;
+    if (guard) {
+      const why = await guard(current);
+      if (why) return { chain, finalUrl: current, status: 0, blocked: true, error: why };
+    }
     let res;
     try {
       res = await fetch(current, {
@@ -262,8 +310,9 @@ export async function rawHeaderValues(url, name, ua = UA_PRESETS.checker, timeou
   }
 }
 
-export function maybeGunzip(buf) {
-  if (buf && buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) return gunzipSync(buf);
+// Capped at the sitemap protocol's 50 MB uncompressed limit, so a gzip bomb cannot exhaust memory.
+export function maybeGunzip(buf, maxOutputLength = 50 * 1024 * 1024) {
+  if (buf && buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) return gunzipSync(buf, { maxOutputLength });
   return buf;
 }
 
@@ -316,7 +365,8 @@ export function decodeEntities(s = '') {
   return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (m, e) => {
     if (e[0] === '#') {
       const cp = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : '\uFFFD';
+      const control = (cp < 0x20 && cp !== 9 && cp !== 10 && cp !== 13) || (cp >= 0x7f && cp <= 0x9f);
+      return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) && !control ? String.fromCodePoint(cp) : '\uFFFD';
     }
     return ENTITIES[e.toLowerCase()] ?? m;
   });
@@ -415,9 +465,35 @@ export function findTags(html, tag) {
 }
 
 // Returns [{attrs, inner, index}] for paired tags (non-nested assumption).
+// Linear: openers are found in one pass and each pairs with the first closing tag after it
+// (non-nested assumption, same results as a lazy regex) via a pointer over the close positions,
+// so thousands of unclosed tags cannot make parsing quadratic.
+function pairRanges(html, tag) {
+  const openRe = new RegExp(`<${tag}(?=[\\s/>])${ATTRS}>`, 'gi');
+  const closes = [...html.matchAll(new RegExp(`<\\/${tag}\\s*>`, 'gi'))].map((m) => [m.index, m[0].length]);
+  const out = [];
+  let ci = 0, m;
+  while ((m = openRe.exec(html))) {
+    const start = m.index + m[0].length;
+    while (ci < closes.length && closes[ci][0] < start) ci++;
+    if (ci >= closes.length) break;
+    out.push({ attrsRaw: m[1], index: m.index, innerStart: start, innerEnd: closes[ci][0], end: closes[ci][0] + closes[ci][1] });
+    openRe.lastIndex = closes[ci][0] + closes[ci][1];
+  }
+  return out;
+}
 export function findPaired(html, tag) {
-  const re = new RegExp(`<${tag}(?=[\\s/>])${ATTRS}>([\\s\\S]*?)<\\/${tag}\\s*>`, 'gi');
-  return [...html.matchAll(re)].map((m) => ({ attrs: parseAttrs(m[1]), inner: m[2], index: m.index }));
+  return pairRanges(html, tag).map((r) => ({ attrs: parseAttrs(r.attrsRaw), inner: html.slice(r.innerStart, r.innerEnd), index: r.index }));
+}
+function blankRanges(h, ranges) {
+  if (!ranges.length) return h;
+  let out = '', last = 0;
+  for (const r of ranges.sort((a, b) => a.index - b.index)) {
+    if (r.index < last) continue;
+    out += h.slice(last, r.index) + ' ';
+    last = r.end;
+  }
+  return out + h.slice(last);
 }
 
 // Index where <head> ends, computed on masked HTML so "<body" inside a script does not count.
@@ -449,16 +525,26 @@ export function wordCount(text) {
 // Removes site chrome so only body-copy links/text remain.
 export function stripChrome(html) {
   let h = scan(html).masked;
-  for (const t of ['nav', 'header', 'footer', 'aside']) {
-    h = h.replace(new RegExp(`<${t}(?=[\\s>])[\\s\\S]*?<\\/${t}\\s*>`, 'gi'), ' ');
+  for (const t of ['nav', 'header', 'footer', 'aside']) h = blankRanges(h, pairRanges(h, t));
+  // Elements with role="navigation": find openers in one pass, close each with the first matching end tag.
+  const ranges = [];
+  const noClose = new Set();
+  for (const m of h.matchAll(/<([a-z][a-z0-9]*)\b(?:[^>"']|"[^"]*"|'[^']*')*\brole=["']?navigation["']?(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
+    const tag = m[1].toLowerCase();
+    if (noClose.has(tag)) continue;
+    const close = new RegExp(`<\\/${tag}\\s*>`, 'gi');
+    close.lastIndex = m.index + m[0].length;
+    const c = close.exec(h);
+    if (!c) { noClose.add(tag); continue; }
+    ranges.push({ index: m.index, end: c.index + c[0].length });
   }
-  h = h.replace(/<([a-z0-9]+)\b[^>]*role=["']?navigation["']?[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
-  return h;
+  return blankRanges(h, ranges);
 }
 
 export function mainContent(html) {
-  const m = scan(html).masked.match(/<main(?=[\s>])[^>]*>([\s\S]*?)<\/main\s*>/i);
-  return m ? m[1] : stripChrome(html);
+  const masked = scan(html).masked;
+  const r = pairRanges(masked, 'main')[0];
+  return r ? masked.slice(r.innerStart, r.innerEnd) : stripChrome(html);
 }
 
 // <base href> changes how every relative URL on the page resolves.

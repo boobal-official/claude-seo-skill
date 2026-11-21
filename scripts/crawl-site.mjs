@@ -12,7 +12,7 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { parseArgs, fetchChain, pool, normalizeUrl, NON_HTML_EXT, NON_PROD_HOST, maybeGunzip, printIssues, exitCodeFor, stripChrome, extractLinks, textOf, mainContent, baseUrlOf, runMain, urlArg, intArg, UsageError } from './lib.mjs';
+import { enableSsrfGuard, parseArgs, fetchChain, pool, normalizeUrl, NON_HTML_EXT, NON_PROD_HOST, maybeGunzip, printIssues, exitCodeFor, stripChrome, extractLinks, textOf, mainContent, baseUrlOf, runMain, urlArg, intArg, UsageError } from './lib.mjs';
 import { parseRobots, isAllowed } from './robots.mjs';
 import { analyzeHtml, analyzeResponse } from './page.mjs';
 import { T } from './thresholds.mjs';
@@ -25,6 +25,7 @@ const ROLLUP = new Set(['noindex-ambiguous', 'client-rendered', 'canonical-in-bo
 
 runMain(async () => {
   const requested = normalizeUrl(urlArg(args._[0], 'origin'));
+  await enableSsrfGuard(requested, { allowPrivate: args['allow-private'] === true });
   // Follow the entry redirect (apex -> www, http -> https) so the crawl runs on the real host.
   const entry = await fetchChain(requested, { read: false });
   if (entry.status === 0 && !entry.chain.length) {
@@ -75,7 +76,7 @@ runMain(async () => {
     const r = await fetchChain(u, { read: 'buffer', maxHops: 5, maxBytes: 60_000_000 });
     if (r.status !== 200 || r.error) { sitemapErrors.push(`${u} -> ${r.status || ''} ${r.error || ''}`.trim()); return; }
     let xml;
-    try { xml = maybeGunzip(r.buffer).toString('utf8'); } catch { sitemapErrors.push(`${u} -> gzip error`); return; }
+    try { xml = maybeGunzip(r.buffer).toString('utf8'); } catch (e) { sitemapErrors.push(`${u} -> ${/maxOutputLength|buffer/i.test(e.message) ? 'decompresses to more than 50 MB (sitemap limit)' : 'gzip error'}`); return; }
     if (!/<(urlset|sitemapindex)\b/i.test(xml)) { sitemapErrors.push(`${u} -> not sitemap XML`); return; }
     if (/<sitemapindex\b/i.test(xml)) {
       for (const m of xml.matchAll(/<sitemap>[\s\S]*?<loc>\s*([^<]+?)\s*<\/loc>[\s\S]*?<\/sitemap>/gi)) await readSitemap(m[1].replace(/&amp;/g, '&'), depth + 1);

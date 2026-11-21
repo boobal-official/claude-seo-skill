@@ -247,6 +247,25 @@ try {
   const ldOnly = `<html lang="en"><head><title>Server rendered page with big JSON-LD</title><script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', '@type': 'Organization', name: 'X', description: 'y'.repeat(30000) })}</script></head><body><main><h1>Hi</h1><p>${'real text '.repeat(30)}</p></main></body></html>`;
   ok(!analyzeHtml(ldOnly, 'https://www.example.com/').issues.some((i) => i.code === 'client-rendered'), 'v5: JSON-LD bytes do not count as client-side rendering script');
 
+  // ---- security review fixes ----
+  const L = await import('../lib.mjs');
+  const { gzipSync } = await import('node:zlib');
+  for (const [h, want] of [['169.254.169.254', true], ['10.0.0.1', true], ['192.168.1.20', true], ['172.20.0.1', true], ['100.64.0.1', true], ['[::1]', true], ['::ffff:127.0.0.1', true], ['fd00::1', true], ['localhost', true], ['8.8.8.8', false], ['93.184.215.14', false]])
+    ok((await L.isPrivateHost(h)) === want, `SSRF: isPrivateHost(${h}) === ${want}`);
+  await L.enableSsrfGuard('https://93.184.215.14/');
+  const blockedFetch = await L.fetchChain(`${bo}/`);
+  ok(blockedFetch.blocked === true && blockedFetch.status === 0, 'SSRF: auditing a public site refuses requests to loopback/private targets', JSON.stringify(blockedFetch).slice(0, 200));
+  await L.enableSsrfGuard('http://127.0.0.1/'); // auditing a local site: guard off again
+  ok((await L.fetchChain(`${bo}/`)).status === 200, 'SSRF: auditing a local site allows local targets');
+  let bomb = false; try { L.maybeGunzip(gzipSync(Buffer.alloc(60 * 1024 * 1024))); } catch { bomb = true; }
+  ok(bomb, 'gzip bomb: decompression capped at 50 MB');
+  ok(L.decodeEntities('a&#27;[31mb&#x9b;c') === 'a�[31mb�c' && L.safe('x\x1b]0;evil\x07y') === 'x�]0;evil�y', 'terminal escapes: control characters neutralised in entities and printed output');
+  const t1 = performance.now();
+  const many = '<a href="/x">'.repeat(20000) + 'text '.repeat(1000) + '<nav>'.repeat(5000) + '<main>'.repeat(5000) + '<div role="navigation">'.repeat(5000);
+  L.findPaired(many, 'a'); L.stripChrome(many); L.mainContent(many);
+  ok(performance.now() - t1 < 2000, 'DoS: thousands of unclosed <a>/<nav>/<main>/role=navigation parse in linear time', `${Math.round(performance.now() - t1)} ms`);
+  ok(L.findPaired('<a href="/1">one</a> <a href="/2">two</a> <a>open', 'a').map((x) => x.inner).join('|') === 'one|two', 'findPaired: linear matcher keeps lazy-regex semantics');
+
   // ---- crawl-site ----
   const cr = await runJ('crawl-site.mjs', bo, '--money', '^/pricing');
   expectCodes(cr, ['soft-404', 'broken-internal-links', 'redirect-chains', 'links-to-redirects', 'sitemap-non-200', 'sitemap-noindex', 'sitemap-non-canonical', 'duplicate-titles', 'missing-title', 'missing-h1', 'deep-pages', 'orphan-pages', 'near-duplicates', 'lastmod-identical', 'money-underlinked', 'url-variant-duplicate', 'og-image-broken', 'pages-client-rendered', 'pages-jsonld-parse-error'], 'crawl broken');

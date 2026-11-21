@@ -21,7 +21,8 @@ and ships with zero-dependency, tested Node.js scripts.
 | **One source of truth** | Every threshold and policy fact lives in `references/thresholds.md`; the scripts read the same values from `scripts/thresholds.mjs`, and the test suite fails if they drift. |
 | **Free data first** | No paid SEO tool required, none recommended, no affiliate links. If you already have Ahrefs/Semrush/DataForSEO, it can use them. |
 | **Safe by default** | Asks before noindexing, redirecting, blocking any crawler, or submitting anything externally. Never sends emails, buys links, or writes reviews. No cloaking, no prompt-injection tricks. Stays inside Google's spam policies. |
-| **Tested tooling** | 257 automated tests against local fixture sites with planted defects, a clean site that must stay clean, and edge cases from four rounds of adversarial code review. |
+| **Tested tooling** | 274 automated tests against local fixture sites with planted defects, a clean site that must stay clean, and edge cases from four rounds of adversarial code review. CI runs them on Windows, macOS and Linux with Node 18, 20 and 22. |
+| **Safe to point at untrusted sites** | SSRF protection (no requests to private/loopback/cloud-metadata addresses when auditing a public site), gzip-bomb and size caps, linear-time parsing, and terminal-escape sanitising of page content. |
 
 ## Install
 
